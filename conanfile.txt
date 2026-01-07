@@ -1,6 +1,6 @@
 [requires]
 jsoncpp/1.9.3
-fmt/7.0.2
+fmt/8.1.1
 
 [generators]
 cmake
