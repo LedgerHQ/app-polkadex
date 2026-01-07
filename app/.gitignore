@@ -44,6 +44,7 @@ glyphs/glyphs\.c
 obj/
 bin/
 debug/
+build/
 bin/app.sha256
 bin/app.apdu
 
