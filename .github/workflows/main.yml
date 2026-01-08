@@ -1,6 +1,12 @@
 name: Build
 on:
   workflow_dispatch:
+    inputs:
+      generate_snapshots:
+        type: boolean
+        required: false
+        default: false
+        description: Generate and upload updated snapshots
   push:
     branches:
       - master
@@ -154,7 +160,7 @@ jobs:
           # --env=node : To support old native modules (no jsdom)
           # --runInBand : To avoid multi-process loading issues
           # --no-cache : To ensure using the binary we just compiled
-          yarn ${{ matrix.variant.test_cmd }} --env=node --runInBand --no-cache
+          yarn ${{ matrix.variant.test_cmd }} --env=node --runInBand --no-cache ${{ github.event.inputs.generate_snapshots == 'true' && '-u' || '' }}
 
       - name: Upload snapshots
         if: always() && github.event.inputs.generate_snapshots == 'true'
