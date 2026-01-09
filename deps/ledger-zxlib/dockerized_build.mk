@@ -23,7 +23,7 @@ TESTS_JS_DIR?=
 
 LEDGER_SRC=$(CURDIR)/app
 DOCKER_APP_SRC=/project
-DOCKER_APP_BIN=$(DOCKER_APP_SRC)/app/bin/app.elf
+DOCKER_APP_BIN=$(DOCKER_APP_SRC)/app/build/$(TARGET)/bin/app.elf
 
 DOCKER_BOLOS_SDKS=/project/deps/nanos-secure-sdk
 DOCKER_BOLOS_SDKX=/project/deps/nanox-secure-sdk
@@ -69,6 +69,7 @@ define run_docker
 	-v $(shell pwd):/project \
 	-e SUPPORT_SR25519=$(SUPPORT_SR25519) \
 	-e SUBSTRATE_PARSER_FULL=$(SUBSTRATE_PARSER_FULL) \
+	-e BIN_DIR=bin \
 	-e COIN=$(COIN) \
 	-e APP_TESTING=$(APP_TESTING) \
 	$(DOCKER_IMAGE_ZONDAX) "$(2)"

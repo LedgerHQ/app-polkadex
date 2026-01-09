@@ -1,6 +1,12 @@
 name: Build
 on:
   workflow_dispatch:
+    inputs:
+      generate_snapshots:
+        type: boolean
+        required: false
+        default: false
+        description: Generate and upload updated snapshots
   push:
     branches:
       - master
@@ -14,7 +20,7 @@ jobs:
       uid_gid: ${{ steps.get-user.outputs.uid_gid }}
     steps:
       - id: get-user
-        run: echo "::set-output name=uid_gid::$(id -u):$(id -g)"
+        run: echo "uid_gid=$(id -u):$(id -g)" >> $GITHUB_OUTPUT
 
   build:
     runs-on: ubuntu-latest
@@ -27,7 +33,7 @@ jobs:
         run: |
           sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 10
           make deps
-          pip install conan
+          pip install "conan<2.0"
       - run: cmake -DCMAKE_BUILD_TYPE=Debug . && make
       - run: GTEST_COLOR=1 ASAN_OPTIONS=detect_leaks=0 ctest -VV
 
@@ -66,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: zondax/builder-bolos:latest
-      options: --user ${{ needs.configure.outputs.uid_gid }}
+      options: --user ${{ needs.configure.outputs.uid_gid }} -e BIN_DIR=bin 
     env:
       BOLOS_SDK: ${{ github.workspace }}/deps/nanos-secure-sdk
       BOLOS_ENV: /opt/bolos
@@ -89,82 +95,109 @@ jobs:
 
   test_zemu:
     runs-on: ubuntu-latest
+    name: test_zemu (${{ matrix.variant.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: standard
+            support_sr25519: ""
+            make_target: ""
+            test_cmd: "test"
+          - name: sr25519
+            support_sr25519: "SUPPORT_SR25519=1"
+            make_target: buildS
+            test_cmd: "testSR25519"
     steps:
-      - name: Test
-        run: |
-          id
-          echo $HOME
-          echo $DISPLAY
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: true
-      - run: sudo apt-get update -y && sudo apt-get install -y libusb-1.0.0 libudev-dev
-      - name: Install rust
+
+      - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake binutils-dev libcurl4-openssl-dev libiberty-dev libelf-dev libdw-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y;
+          sudo apt-get update -y && sudo apt-get install -y libusb-1.0.0 libudev-dev
+
+      # Node 14 required for this project (Legacy Neon 0.10)
       - name: Install node
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v3
         with:
-          node-version: '14.17.0'
-      - name: Install yarn
-        run: |
-          npm install -g yarn
+          node-version: '14.x'
+
+      # Rust 1.65 required for compatibility with Neon 0.10
+      # (Newer versions break the native module build)
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@1.65.0
+
       - name: Build Ledger app
         run: |
-          make SUBSTRATE_PARSER_FULL=1
-      - name: Build/Install build js deps
+          SUBSTRATE_PARSER_FULL=1 ${{ matrix.variant.support_sr25519 }} make ${{ matrix.variant.make_target }}
+
+      # Critical FIX: npm 8 contains a node-gyp compatible with Python 3
+      # Essential on recent Ubuntu runners with Node 14
+      - name: Update npm to fix node-gyp python3 compatibility
+        run: npm install -g npm@8
+
+      - name: Install JS deps
         run: |
-          export PATH=~/.cargo/bin:$PATH
           make zemu_install
+
+      # EXPLICIT REBUILD: We force a clean recompilation of the native module
+      # for the exact runner environment, overwriting what 'make zemu_install' did.
+      - name: Rebuild neon module
+        working-directory: tests_tools/neon
+        run: |
+          # 1. Install JS dependencies
+          yarn install
+          # 2. MANUAL CLEANUP: We remove the existing binary to force recreation
+          rm -rf native/index.node target/
+          # 3. We run the exact build command indicated in your package.json
+          ./node_modules/.bin/neon build
+
       - name: Run zemu tests
+        working-directory: tests_zemu
         run: |
-          export PATH=~/.cargo/bin:$PATH
-          make zemu_test
+          # --env=node : To support old native modules (no jsdom)
+          # --runInBand : To avoid multi-process loading issues
+          # --no-cache : To ensure using the binary we just compiled
+          yarn ${{ matrix.variant.test_cmd }} --env=node --runInBand --no-cache ${{ github.event.inputs.generate_snapshots == 'true' && '-u' || '' }}
 
-  test_zemu_sr25519:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Upload snapshots
+        if: always() && github.event.inputs.generate_snapshots == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          submodules: true
-      - run: sudo apt-get update -y && sudo apt-get install -y libusb-1.0.0 libudev-dev
-      - name: Install rust
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake binutils-dev libcurl4-openssl-dev libiberty-dev libelf-dev libdw-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y;
-      - name: Install node
-        uses: actions/setup-node@v2
-        with:
-          node-version: '14.17.0'
-      - name: Install yarn
-        run: |
-          npm install -g yarn
-      - name: Build Ledger app
-        run: |
-          make clean_build && SUBSTRATE_PARSER_FULL=1 SUPPORT_SR25519=1 make buildS
-      - name: Build/Install build js deps
-        run: |
-          export PATH=~/.cargo/bin:$PATH
-          make zemu_install
-      - name: Run zemu tests for sr25519
-        run: |
-          export PATH=~/.cargo/bin:$PATH
-          cd tests_zemu && yarn testSR25519
+          name: snapshots-${{ matrix.variant.name }}
+          path: tests_zemu/snapshots-tmp
 
-  build_package_0:
-    needs: [ configure, build, build_ledger, test_zemu, test_zemu_sr25519 ]
+  build_package:
+    needs: [ configure, build, build_ledger, test_zemu ]
     if: ${{ github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-latest
+    name: build_package (${{ matrix.package.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - name: nanos_light
+            sdk: nanos-secure-sdk
+            parser_full: 0
+            installer_src: installer_s.sh
+            installer_dest: installer_nanos_light.sh
+          - name: nanos_xl
+            sdk: nanos-secure-sdk
+            parser_full: 1
+            installer_src: installer_s.sh
+            installer_dest: installer_nanos_xl.sh
+          - name: nanosp_xl
+            sdk: nanosplus-secure-sdk
+            parser_full: 1
+            installer_src: installer_s2.sh
+            installer_dest: installer_nanosp_xl.sh
     container:
       image: zondax/builder-bolos:latest
       options: --user ${{ needs.configure.outputs.uid_gid }}
     env:
-      BOLOS_SDK: ${{ github.workspace }}/deps/nanos-secure-sdk
+      BOLOS_SDK: ${{ github.workspace }}/deps/${{ matrix.package.sdk }}
       BOLOS_ENV: /opt/bolos
       HOME: /home/zondax_circle
     steps:
@@ -175,100 +208,21 @@ jobs:
       - name: Install deps
         run: pip install ledgerblue
 
-      - name: Build NanoS light
+      - name: Build ${{ matrix.package.name }}
         shell: bash -l {0}
         run: |
           source $HOME/.cargo/env
-          make SUBSTRATE_PARSER_FULL=0
-          mv ./app/pkg/installer_s.sh ./app/pkg/installer_nanos_light.sh
+          make SUBSTRATE_PARSER_FULL=${{ matrix.package.parser_full }}
+          mv ./app/pkg/${{ matrix.package.installer_src }} ./app/pkg/${{ matrix.package.installer_dest }}
       - name: Set tag
-        id: nanos_light
-        run: echo ::set-output name=tag_name::$(./app/pkg/installer_nanos_light.sh version)
-      - name: Create or Update Release (1)
-        id: create_release_0
+        id: tag
+        run: echo "tag_name=$(./app/pkg/${{ matrix.package.installer_dest }} version)" >> $GITHUB_OUTPUT
+      - name: Create or Update Release
         uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: ./app/pkg/installer_nanos_light.sh
-          tag_name: ${{ steps.nanos_light.outputs.tag_name }}
-          draft: false
-          prerelease: false
-
-  build_package_1:
-    needs: [ configure, build, build_ledger, test_zemu, test_zemu_sr25519 ]
-    if: ${{ github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-latest
-    container:
-      image: zondax/builder-bolos:latest
-      options: --user ${{ needs.configure.outputs.uid_gid }}
-    env:
-      BOLOS_SDK: ${{ github.workspace }}/deps/nanos-secure-sdk
-      BOLOS_ENV: /opt/bolos
-      HOME: /home/zondax_circle
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Install deps
-        run: pip install ledgerblue
-
-      - name: Build NanoS XL
-        shell: bash -l {0}
-        run: |
-          source $HOME/.cargo/env
-          make SUBSTRATE_PARSER_FULL=1
-          mv ./app/pkg/installer_s.sh ./app/pkg/installer_nanos_xl.sh
-      - name: Set tag
-        id: nanos_xl
-        run: echo ::set-output name=tag_name::$(./app/pkg/installer_nanos_xl.sh version)
-      - name: Update Release
-        id: update_release_1
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
-        with:
-          files: ./app/pkg/installer_nanos_xl.sh
-          tag_name: ${{ steps.nanos_xl.outputs.tag_name }}
-          draft: false
-          prerelease: false
-
-  build_package_2:
-    needs: [ configure, build, build_ledger, test_zemu, test_zemu_sr25519 ]
-    if: ${{ github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-latest
-    container:
-      image: zondax/builder-bolos:latest
-      options: --user ${{ needs.configure.outputs.uid_gid }}
-    env:
-      BOLOS_SDK: ${{ github.workspace }}/deps/nanosplus-secure-sdk
-      BOLOS_ENV: /opt/bolos
-      HOME: /home/zondax_circle
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Install deps
-        run: pip install ledgerblue
-
-      - name: Build NanoSP XL
-        shell: bash -l {0}
-        run: |
-          source $HOME/.cargo/env
-          make SUBSTRATE_PARSER_FULL=1
-          mv ./app/pkg/installer_s2.sh ./app/pkg/installer_nanosp_xl.sh
-      - name: Set tag
-        id: nanosp_xl
-        run: echo ::set-output name=tag_name::$(./app/pkg/installer_nanosp_xl.sh version)
-      - name: Update Release
-        id: update_release_2
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
-        with:
-          files: ./app/pkg/installer_nanosp_xl.sh
-          tag_name: ${{ steps.nanosp_xl.outputs.tag_name }}
+          files: ./app/pkg/${{ matrix.package.installer_dest }}
+          tag_name: ${{ steps.tag.outputs.tag_name }}
           draft: false
           prerelease: false
