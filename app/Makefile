@@ -30,11 +30,11 @@ all: bin/app.elf
 	@echo "LOAD_PARAMS=\"${APP_LOAD_PARAMS}\"" >> $(OUTPUT_INSTALLER)
 	@echo "DELETE_PARAMS=\"${APP_DELETE_PARAMS}\"" >> $(OUTPUT_INSTALLER)
 	@echo "APPHEX=\"" >> $(OUTPUT_INSTALLER)
-	@cat $(CURDIR)/bin/app.hex >> $(OUTPUT_INSTALLER)
+	@cat $(BIN_DIR)/app.hex >> $(OUTPUT_INSTALLER)
 	@echo "\"" >> $(OUTPUT_INSTALLER)
 	@cat $(CURDIR)/../deps/ledger-zxlib/scripts/template.sh >> $(OUTPUT_INSTALLER)
 	@chmod +x $(OUTPUT_INSTALLER)
-	@cp $(CURDIR)/bin/* $(CURDIR)/output
+	@cp $(BIN_DIR)/* $(CURDIR)/output
 	@cp $(CURDIR)/output/app.elf ${OUTPUT_ELF}
 	@rm $(CURDIR)/output/app.elf
 
@@ -223,6 +223,8 @@ APP_SOURCE_PATH += $(MY_DIR)/../deps/ledger-zxlib/app/common
 
 SDK_SOURCE_PATH += lib_stusb lib_stusb_impl
 SDK_SOURCE_PATH  += lib_ux
+
+APP_CUSTOM_LINK_DEPENDENCIES = rust
 
 .PHONY: rust
 rust:
